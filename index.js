@@ -59,7 +59,8 @@ async function generateWithGeminiFallback(prompt) {
     throw new Error('Нет доступных ключей GEMINI_API_KEY в переменной окружения .env');
   }
 
-  const response = await fetch(`https://generativelanguage.googleapis.com/v1/models/gemini-1.5-flash:generateContent?key=${apiKey}`, {
+  // Переключаемся на актуальную и быструю модель gemini-2.5-flash
+  const response = await fetch(`https://generativelanguage.googleapis.com/v1/models/gemini-2.5-flash:generateContent?key=${apiKey}`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
