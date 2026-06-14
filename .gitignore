@@ -1,0 +1,10 @@
+node_modules/
+.env
+data/
+*.log
+test-*.js
+patch.js
+check-models.js
+.env
+API-ключи.txt
+node_modules/

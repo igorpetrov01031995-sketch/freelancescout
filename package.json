@@ -1,0 +1,22 @@
+{
+  "name": "b2b-mind-orchestrator",
+  "version": "1.0.0",
+  "description": "AI-Orchestrator B2B-Mind MVP",
+  "main": "index.js",
+  "type": "module",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "dependencies": {
+    "@google/genai": "^2.8.0",
+    "@google/generative-ai": "^0.21.0",
+    "dotenv": "^16.4.5",
+    "fast-xml-parser": "^5.8.0",
+    "groq-sdk": "^1.2.1",
+    "imap": "^0.8.19",
+    "mailparser": "^3.9.9",
+    "rss-parser": "^3.13.0",
+    "telegraf": "^4.16.3",
+    "undici": "^8.4.1"
+  }
+}
