@@ -52,6 +52,9 @@ async function generateWithRetry(prompt, maxRetries = 3) {
   }
 }
 
+// Глобальный указатель на текущий рабочий ключ Gemini (сохраняет состояние между вызовами функции)
+let currentGeminiKeyIndex = 0;
+
 // Резервная функция-бэкап с умной ротацией ключей при ошибках 429
 async function generateWithGeminiFallback(prompt) {
   // Собираем все ключи в один массив и убираем пустые, если они не заданы в .env
@@ -66,9 +69,12 @@ async function generateWithGeminiFallback(prompt) {
     throw new Error('Нет доступных ключей GEMINI_API_KEY в переменной окружения .env');
   }
 
-  // Перебираем ключи по очереди
-  for (let i = 0; i < apiKeys.length; i++) {
-    const apiKey = apiKeys[i];
+  // Делаем максимум попыток по количеству доступных ключей
+  for (let attempts = 0; attempts < apiKeys.length; attempts++) {
+    // Начинаем опрос с ключа, на котором остановились в прошлый раз
+    const idx = currentGeminiKeyIndex % apiKeys.length;
+    const apiKey = apiKeys[idx];
+    
     try {
       const response = await fetch(`https://generativelanguage.googleapis.com/v1/models/gemini-2.5-flash:generateContent?key=${apiKey}`, {
         method: 'POST',
@@ -81,9 +87,10 @@ async function generateWithGeminiFallback(prompt) {
       if (!response.ok) {
         const errText = await response.text();
         
-        // Если этот конкретный ключ поймал лимит 429 и у нас есть следующий ключ — ротируем!
-        if (response.status === 429 && i < apiKeys.length - 1) {
-          console.log(`⚠️ [Gemini] Ключ №${i + 1} исчерпал лимит (429). Автопереключение на ключ №${i + 2}...`);
+        // Если этот конкретный ключ поймал лимит 429 — сдвигаем глобальный указатель и ротируем
+        if (response.status === 429) {
+          console.log(`⚠️ [Gemini] Ключ №${idx + 1} исчерпал лимит (429). Автопереключение указателя на следующий ключ...`);
+          currentGeminiKeyIndex++;
           continue; 
         }
         throw new Error(`Gemini API Error: ${response.status} - ${errText}`);
@@ -93,15 +100,19 @@ async function generateWithGeminiFallback(prompt) {
       return data.candidates?.[0]?.content?.parts?.[0]?.text || '';
 
     } catch (error) {
-      // Ловим сетевые ошибки или ошибки таймаута: если это 429 и есть запасные ключи — идем дальше
-      if ((error.message?.includes('429') || error.status === 429) && i < apiKeys.length - 1) {
-        console.log(`⚠️ [Gemini] Ошибка сети (429) на ключе №${i + 1}. Пробуем ключ №${i + 2}...`);
+      // Ловим сетевые ошибки или ошибки таймаута
+      if (error.message?.includes('429') || error.status === 429) {
+        console.log(`⚠️ [Gemini] Ошибка сети (429) на ключе №${idx + 1}. Переключаем указатель...`);
+        currentGeminiKeyIndex++;
         continue;
       }
-      throw error; // Если ключи кончились или ошибка критическая — прокидываем её наверх
+      throw error;
     }
   }
+  
+  throw new Error('❌ Все доступные ключи Gemini одновременно лежат в 429 лимите.');
 }
+
 // Наш системный промпт с жестким лимитом под Telegram (адаптирован под Llama и Gemini)
 const SYSTEM_ORCHESTRATION_PROMPT = `
 Ты — высококвалифицированный консилиум экспертов "FreelanceScout" по оценке фриланс-заказов в сфере IT и B2B.
@@ -265,6 +276,10 @@ async function runAutoParser() {
 
   // --- ЭТАП 3: ПРОГОНЯЕМ КАЖДЫЙ ЗАКАЗ FL.RU ЧЕРЕЗ ИИ ---
   for (const ad of flAds) {
+    // ПУЛЬС-ФИЛЬТР: Искусственная пауза в 2 секунды перед КАЖДЫМ заказом. 
+    // Защищает API от залпового огня, даже если предыдущие заказы улетели в continue!
+    await new Promise(resolve => setTimeout(resolve, 2000));
+
     console.log(`[AutoParser] Передаем на консилиум: "${ad.title}"`);
 
     const inputText = `Заголовок: ${ad.title}\nКатегория: ${ad.category}\nОписание: ${ad.description}\nСсылка: ${ad.link}`;
@@ -332,8 +347,8 @@ ${analysis.first_reply}
       await bot.telegram.sendMessage(TELEGRAM_CHAT_ID, fullMessage.slice(0, 4000) + '\n\n...[Текст обрезан]');
     }
 
-    // Защитная пауза между запросами
-    await new Promise(resolve => setTimeout(resolve, 5000));
+    // Дополнительная защитная пауза для одобренных сочных лидов (чтобы не спамить Телеграм)
+    await new Promise(resolve => setTimeout(resolve, 3000));
   }
 
   console.log('[AutoParser] ✅ Все новые заказы проверены. Спим 15 минут.');
