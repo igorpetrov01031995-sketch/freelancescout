@@ -119,39 +119,42 @@ export async function fetchNewAds() {
     const id = (item.guid?.__cdata || item.guid || item.link || '').toString().trim();
     if (!id) continue;
 
-    // Проверяем в MongoDB, видели ли мы этот заказ ранее
-    const alreadySeen = await seenAdsCollection.findOne({ orderId: id });
-    if (alreadySeen) {
-      continue; // Если видели — молча пропускаем
-    }
+    // 1. Проверка дубля
+const alreadySeen = await seenAdsCollection.findOne({ orderId: id });
+if (alreadySeen) {
+  continue;
+}
 
-    // Собираем чистый объект заказа
-    const ad = {
-      id,
-      title: item.title?.__cdata || item.title || 'Без названия',
-      description: (item.description?.__cdata || item.description || '').slice(0, 800),
-      link: item.link?.__cdata || item.link || '',
-      category: item.category?.__cdata || item.category || '',
-      pubDate: item.pubDate || ''
-    };
+// 2. Собираем объект
+const ad = {
+  id,
+  title: item.title?.__cdata || item.title || 'Без названия',
+  description: (item.description?.__cdata || item.description || '').slice(0, 800),
+  link: item.link?.__cdata || item.link || '',
+  category: item.category?.__cdata || item.category || '',
+  pubDate: item.pubDate || ''
+};
 
-    // Заказ абсолютно новый! Сразу же сохраняем его в MongoDB, чтобы больше не обрабатывать
-    try {
-      await seenAdsCollection.insertOne({
-        orderId: id,
-        title: ad.title,
-        createdAt: new Date()
-      });
-    } catch (e) {
-      // Защита от параллельных запросов
-      continue;
-    }
+// 3. ФИЛЬТР — СНАЧАЛА решаем, нужен ли заказ
+if (!isOrderRelevant(ad)) {
+  console.log(`[FL Parser] ⏭ Пропускаем (не наша ниша): "${ad.title}"`);
+  continue;
+}
 
-    // Проверяем заказ через сито регулярных выражений по заголовку
-    if (!isOrderRelevant(ad)) {
-      console.log(`[FL Parser] ⏭ Пропускаем (не наша ниша): "${ad.title}"`);
-      continue;
-    }
+// 4. Только теперь добавляем в результат
+console.log(`[FL Parser] ✅ Новый релевантный заказ: "${ad.title}"`);
+newAds.push(ad);
+
+// 5. И ТОЛЬКО ПОСЛЕ ЭТОГО фиксируем в Mongo
+try {
+  await seenAdsCollection.insertOne({
+    orderId: id,
+    title: ad.title,
+    createdAt: new Date()
+  });
+} catch (e) {
+  continue;
+}
 
     // Если заказ прошел все фильтры — отправляем его в массив для ИИ
     console.log(`[FL Parser] ✅ Новый релевантный заказ: "${ad.title}"`);
