@@ -37,42 +37,28 @@ async function generateWithRetry(systemPrompt, userPrompt, maxRetries = 3) {
   for (let attempt = 1; attempt <= maxRetries; attempt++) {
     try {
       const completion = await groq.chat.completions.create({
+        model: 'llama-3.3-70b-versatile',
         messages: [
-          { role: 'system', content: systemPrompt },
-          { role: 'user', content: userPrompt }
-        ],
-        model: 'llama-3.1-8b-instant',
-        temperature: 0.1 // Минимальная температура для максимальной точности следования ТЗ
+          {
+            role: 'system',
+            content: systemPrompt
+          },
+          {
+            role: 'user',
+            content: userPrompt
+          }
+        ]
       });
 
-      const result = completion.choices[0]?.message?.content || '';
-
-      // ПРОБЛЕМА №3: ТОЧНЫЙ ДЕБАГ-ЛОГ СЫРОГО ОТВЕТА В КОНСОЛЬ
-      console.log('\n=================== [DEBUG] СЫРОЙ ОТВЕТ GROQ ===================');
-      console.log(`Ответ ИИ: -> ${result} <-`);
-      console.log('================================================================\n');
-
-      // ПРОБЛЕМА №2 (Вариант А): Перехват скрытых текстовых ошибок лимитов или пустых ответов
-      const upperResult = result.toUpperCase();
-      if (!result.trim() || upperResult.includes('LIMIT') || upperResult.includes('QUOTA') || upperResult.includes('EXCEEDED') || upperResult.includes('UNAVAILABLE')) {
-        throw new Error('429: Detected hidden text API limit or empty response inside content');
-      }
-
-      return result;
+      return completion.choices[0]?.message?.content || '';
 
     } catch (error) {
-      const errMsg = error.message?.toLowerCase() || '';
-      
-      // Если это реальный или искусственный лимит квоты — на последней попытке пробрасываем его для бэкапа Gemini
-      if (errMsg.includes('429') || errMsg.includes('limit') || errMsg.includes('quota') || error.status === 429) {
-        if (attempt === maxRetries) throw error;
-      }
-
       if (attempt < maxRetries) {
-        console.log(`[Groq] Ошибка API или лимитов. Попытка ${attempt}/${maxRetries}. Пауза 5 секунд...`);
+        console.log(`[Groq] Ошибка API. Попытка ${attempt}/${maxRetries}. Пауза 5 секунд...`);
         await new Promise(resolve => setTimeout(resolve, 5000));
         continue;
       }
+
       throw error;
     }
   }
@@ -227,20 +213,29 @@ bot.on('text', async (ctx) => {
     try {
       console.log('[KworkInterceptor] Передаем проект на ИИ-консилиум...');
       
-      let result = '';
-      try {
-        // Изменение: передаем параметры раздельно (System / User)
-        result = await generateWithRetry(SYSTEM_ORCHESTRATION_PROMPT, `ТЕКСТ ПРОЕКТА:\n"${incomingText}"`);
-      } catch (err) {
-        const errMsg = err.message?.toLowerCase() || '';
-        if (err.status === 429 || errMsg.includes('429') || errMsg.includes('limit') || errMsg.includes('quota')) {
-          console.log('⚠️ [Groq] Лимит исчерпан в ручном режиме. Fallback на Gemini...');
-          const fullPrompt = `${SYSTEM_ORCHESTRATION_PROMPT}\n\nТЕКСТ ПРОЕКТА:\n"${incomingText}"`;
-          result = await generateWithGeminiFallback(fullPrompt);
-        } else {
-          throw err;
-        }
-      }
+      // =============================================================
+// Блок №4 — добавить дебаг перед отправкой в ИИ
+// =============================================================
+console.log('\n================ INPUT TO AI ================');
+console.log(inputText);
+console.log('=============================================\n');
+
+let result = '';
+
+// =============================================================
+// Блок №2 — вызов функции (параметры ложатся идеально)
+// =============================================================
+result = await generateWithRetry(
+  SYSTEM_ORCHESTRATION_PROMPT,
+  `ТЕКСТ ПРОЕКТА:\n"${inputText}"`
+);
+
+// =============================================================
+// Блок №3 — добавить дебаг ответа Groq
+// =============================================================
+console.log('\n================ GROQ ANSWER ================');
+console.log(result);
+console.log('=============================================\n');
 
       if (result.includes('НЕ НАША НИША') || result.includes('ПРОПУСТИТЬ')) {
         incrementRejected();
