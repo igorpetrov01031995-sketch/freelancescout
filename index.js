@@ -32,17 +32,44 @@ const groq = new Groq({ apiKey: process.env.GROQ_API_KEY });
 const TELEGRAM_CHAT_ID = process.env.TELEGRAM_CHAT_ID;
 console.log('🔍 Отладка: Экземпляры созданы. Переходим к основному коду бота...');
 
-// Живучая функция запросов к Groq: обрабатывает перегрузки 503 и лимиты 429
-async function generateWithRetry(prompt, maxRetries = 3) {
+// Умная функция запросов к Groq: разделяет System/User роли и логирует сырые данные
+async function generateWithRetry(systemPrompt, userPrompt, maxRetries = 3) {
   for (let attempt = 1; attempt <= maxRetries; attempt++) {
     try {
-      return await groq.chat.completions.create({
-        messages: [{ role: 'user', content: prompt }],
+      const completion = await groq.chat.completions.create({
+        messages: [
+          { role: 'system', content: systemPrompt },
+          { role: 'user', content: userPrompt }
+        ],
         model: 'llama-3.1-8b-instant',
+        temperature: 0.1 // Минимальная температура для максимальной точности следования ТЗ
       });
+
+      const result = completion.choices[0]?.message?.content || '';
+
+      // ПРОБЛЕМА №3: ТОЧНЫЙ ДЕБАГ-ЛОГ СЫРОГО ОТВЕТА В КОНСОЛЬ
+      console.log('\n=================== [DEBUG] СЫРОЙ ОТВЕТ GROQ ===================');
+      console.log(`Ответ ИИ: -> ${result} <-`);
+      console.log('================================================================\n');
+
+      // ПРОБЛЕМА №2 (Вариант А): Перехват скрытых текстовых ошибок лимитов или пустых ответов
+      const upperResult = result.toUpperCase();
+      if (!result.trim() || upperResult.includes('LIMIT') || upperResult.includes('QUOTA') || upperResult.includes('EXCEEDED') || upperResult.includes('UNAVAILABLE')) {
+        throw new Error('429: Detected hidden text API limit or empty response inside content');
+      }
+
+      return result;
+
     } catch (error) {
+      const errMsg = error.message?.toLowerCase() || '';
+      
+      // Если это реальный или искусственный лимит квоты — на последней попытке пробрасываем его для бэкапа Gemini
+      if (errMsg.includes('429') || errMsg.includes('limit') || errMsg.includes('quota') || error.status === 429) {
+        if (attempt === maxRetries) throw error;
+      }
+
       if (attempt < maxRetries) {
-        console.log(`[Groq] Ошибка API. Попытка ${attempt}/${maxRetries}. Пауза 5 секунд...`);
+        console.log(`[Groq] Ошибка API или лимитов. Попытка ${attempt}/${maxRetries}. Пауза 5 секунд...`);
         await new Promise(resolve => setTimeout(resolve, 5000));
         continue;
       }
@@ -56,7 +83,6 @@ let currentGeminiKeyIndex = 0;
 
 // Резервная функция-бэкап с умной ротацией ключей при ошибках 429
 async function generateWithGeminiFallback(prompt) {
-  // Собираем все ключи в один массив и убираем пустые, если они не заданы в .env
   const apiKeys = [
     process.env.GEMINI_API_KEY_1,
     process.env.GEMINI_API_KEY_2,
@@ -68,9 +94,7 @@ async function generateWithGeminiFallback(prompt) {
     throw new Error('Нет доступных ключей GEMINI_API_KEY в переменной окружения .env');
   }
 
-  // Делаем максимум попыток по количеству доступных ключей
   for (let attempts = 0; attempts < apiKeys.length; attempts++) {
-    // Начинаем опрос с ключа, на котором остановились в прошлый раз
     const idx = currentGeminiKeyIndex % apiKeys.length;
     const apiKey = apiKeys[idx];
     
@@ -86,7 +110,6 @@ async function generateWithGeminiFallback(prompt) {
       if (!response.ok) {
         const errText = await response.text();
         
-        // Если этот конкретный ключ поймал лимит 429 — сдвигаем глобальный указатель и ротируем
         if (response.status === 429) {
           console.log(`⚠️ [Gemini] Ключ №${idx + 1} исчерпал лимит (429). Автопереключение указателя на следующий ключ...`);
           currentGeminiKeyIndex++;
@@ -99,7 +122,6 @@ async function generateWithGeminiFallback(prompt) {
       return data.candidates?.[0]?.content?.parts?.[0]?.text || '';
 
     } catch (error) {
-      // Ловим сетевые ошибки или ошибки таймаута для глубокого дебага
       console.log('[Gemini КРИТИЧЕСКИЙ ДЕБАГ ОШИБКИ]:', error);
       if (error.message?.includes('429') || error.status === 429) {
         console.log(`⚠️ [Gemini] Ошибка сети (429) на ключе №${idx + 1}. Переключаем указатель...`);
@@ -203,23 +225,24 @@ bot.on('text', async (ctx) => {
     console.log('[KworkInterceptor] 🚀 Пойман автоматический заказ с Kwork!');
     
     try {
-      const fullPrompt = `${SYSTEM_ORCHESTRATION_PROMPT}\n\nТЕКСТ ПРОЕКТА:\n"${incomingText}"`;
       console.log('[KworkInterceptor] Передаем проект на ИИ-консилиум...');
       
       let result = '';
       try {
-        const completion = await generateWithRetry(fullPrompt);
-        result = completion.choices[0]?.message?.content || '';
+        // Изменение: передаем параметры раздельно (System / User)
+        result = await generateWithRetry(SYSTEM_ORCHESTRATION_PROMPT, `ТЕКСТ ПРОЕКТА:\n"${incomingText}"`);
       } catch (err) {
-        if (err.message?.includes('429') || err.status === 429) {
+        const errMsg = err.message?.toLowerCase() || '';
+        if (err.status === 429 || errMsg.includes('429') || errMsg.includes('limit') || errMsg.includes('quota')) {
           console.log('⚠️ [Groq] Лимит исчерпан в ручном режиме. Fallback на Gemini...');
+          const fullPrompt = `${SYSTEM_ORCHESTRATION_PROMPT}\n\nТЕКСТ ПРОЕКТА:\n"${incomingText}"`;
           result = await generateWithGeminiFallback(fullPrompt);
         } else {
           throw err;
         }
       }
 
-      if (result.includes('НЕ НАША НИША')) {
+      if (result.includes('НЕ НАША НИША') || result.includes('ПРОПУСТИТЬ')) {
         incrementRejected();
         console.log(`[KworkInterceptor] ⛔ Заказ отклонен ИИ (не наша специализация)`);
         return;
@@ -276,32 +299,36 @@ async function runAutoParser() {
 
   // --- ЭТАП 3: ПРОГОНЯЕМ КАЖДЫЙ ЗАКАЗ FL.RU ЧЕРЕЗ ИИ ---
   for (const ad of flAds) {
-    // ПУЛЬС-ФИЛЬТР: Искусственная пауза в 2.5 секунды перед КАЖДЫМ заказом. 
-    // Защищает API от залпового огня по RPM, даже если предыдущие заказы пролетели по continue!
+    // ПУЛЬС-ФИЛЬТР: Пауза в 2.5 секунды защищает API от перегрузки RPM
     await new Promise(resolve => setTimeout(resolve, 2500));
 
     console.log(`[AutoParser] Передаем на консилиум: "${ad.title}"`);
 
     const inputText = `Заголовок: ${ad.title}\nКатегория: ${ad.category}\nОписание: ${ad.description}\nСсылка: ${ad.link}`;
-    const fullPrompt = `${SYSTEM_ORCHESTRATION_PROMPT}\n\nТЕКСТ ПРОЕКТА:\n"${inputText}"`;
     
     let result = '';
     let isFallbackUsed = false;
 
     try {
-      // Пытаемся получить вердикт от основного ИИ Groq
-      const completion = await generateWithRetry(fullPrompt);
-      result = completion.choices[0]?.message?.content || '';
+      // Изменение: Передаем раздельно системный промпт и пользовательский текст
+      result = await generateWithRetry(SYSTEM_ORCHESTRATION_PROMPT, `ТЕКСТ ПРОЕКТА:\n"${inputText}"`);
     } catch (err) {
-      // Если поймали суточный лимит 429 — плавно переключаем сито на резервный Gemini
-      if (err.message?.includes('429') || err.status === 429 || err.message?.toLowerCase().includes('limit')) {
-        console.log(`⚠️ [Groq] Превышен суточный лимит токенов (429). Автопереключение на резервный фильтр Gemini...`);
+      const errMsg = err.message?.toLowerCase() || '';
+      // Если поймали лимит — плавно переключаем сито на резервный Gemini
+      if (err.status === 429 || errMsg.includes('429') || errMsg.includes('limit') || errMsg.includes('quota')) {
+        console.log(`⚠️ [Groq] Превышен суточный лимит токенов (429/limit). Автопереключение на резервный фильтр Gemini...`);
         try {
+          const fullPrompt = `${SYSTEM_ORCHESTRATION_PROMPT}\n\nТЕКСТ ПРОЕКТА:\n"${inputText}"`;
           result = await generateWithGeminiFallback(fullPrompt);
           isFallbackUsed = true;
+          
+          // Логируем сырой ответ Gemini для прозрачности дебага
+          console.log('\n=================== [DEBUG] СЫРОЙ ОТВЕТ GEMINI ===================');
+          console.log(`Ответ ИИ: -> ${result} <-`);
+          console.log('================================================================\n');
         } catch (geminiErr) {
           console.error(`❌ [AutoParser] Резервный Gemini тоже дал сбой для "${ad.title}":`, geminiErr.message);
-          continue; // Оба ИИ перегружены, идем к следующему объявлению
+          continue; 
         }
       } else {
         console.error(`❌ [AutoParser] Критическая ошибка Groq при фильтрации "${ad.title}":`, err.message);
@@ -309,7 +336,7 @@ async function runAutoParser() {
       }
     }
 
-    // Фильтр ниши
+    // Фильтр ниши по результатам анализа
     if (result.includes('НЕ НАША НИША') || result.includes('ПРОПУСТИТЬ') || result.includes('НЕ НАШ СТЕК')) {
       console.log(`[AutoParser] ⛔ Заказ отклонен ИИ (не наша специализация): ${ad.title}`);
       incrementRejected();
@@ -319,11 +346,7 @@ async function runAutoParser() {
     console.log(`[AutoParser] 🔥 Заказ одобрен ${isFallbackUsed ? 'Gemini (Резерв)' : 'Groq'}! Отправляем вердикт консилиума в Telegram...`);
     incrementApproved();
 
-    // ОПТИМИЗАЦИЯ: Вместо тяжелого повторного структурного анализа Gemini, мы используем 
-    // готовый детальный разбор (result) от Groq, который уже содержит полные данные экспертов.
-    // Это экономит суточные лимиты "PerProject" на 95%!
     const geminiCard = result; 
-
     const header = `🆕 НОВЫЙ ЗАКАЗ С FL.RU\n📌 ${ad.title}\n🔗 ${ad.link}\n\n`;
     const fullMessage = header + geminiCard;
 
@@ -333,7 +356,6 @@ async function runAutoParser() {
       await bot.telegram.sendMessage(TELEGRAM_CHAT_ID, fullMessage.slice(0, 4000) + '\n\n...[Текст обрезан]');
     }
 
-    // Дополнительный тайм-аут для успешной отправки в ТГ
     await new Promise(resolve => setTimeout(resolve, 1500));
   }
 
