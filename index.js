@@ -300,13 +300,18 @@ async function runAutoParser() {
     console.log(`[AutoParser] Передаем на консилиум: "${ad.title}"`);
 
     const inputText = `Заголовок: ${ad.title}\nКатегория: ${ad.category}\nОписание: ${ad.description}\nСсылка: ${ad.link}`;
-    
+    console.log('\n================ INPUT TO GROQ ================');
+console.log(inputText);
+console.log('===============================================\n');
     let result = '';
     let isFallbackUsed = false;
 
     try {
       // Изменение: Передаем раздельно системный промпт и пользовательский текст
       result = await generateWithRetry(SYSTEM_ORCHESTRATION_PROMPT, `ТЕКСТ ПРОЕКТА:\n"${inputText}"`);
+      console.log('\n================ GROQ RAW ANSWER ================');
+console.log(result);
+console.log('================================================\n');
     } catch (err) {
       const errMsg = err.message?.toLowerCase() || '';
       // Если поймали лимит — плавно переключаем сито на резервный Gemini
