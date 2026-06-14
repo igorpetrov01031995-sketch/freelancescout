@@ -52,31 +52,56 @@ async function generateWithRetry(prompt, maxRetries = 3) {
   }
 }
 
-// Резервная функция-бэкап на случай, если суточные лимиты Groq полностью исчерпаны
+// Резервная функция-бэкап с умной ротацией ключей при ошибках 429
 async function generateWithGeminiFallback(prompt) {
-  const apiKey = process.env.GEMINI_API_KEY_1 || process.env.GEMINI_API_KEY_2 || process.env.GEMINI_API_KEY_3 || process.env.GEMINI_API_KEY_4;
-  if (!apiKey) {
+  // Собираем все ключи в один массив и убираем пустые, если они не заданы в .env
+  const apiKeys = [
+    process.env.GEMINI_API_KEY_1,
+    process.env.GEMINI_API_KEY_2,
+    process.env.GEMINI_API_KEY_3,
+    process.env.GEMINI_API_KEY_4
+  ].filter(Boolean);
+
+  if (apiKeys.length === 0) {
     throw new Error('Нет доступных ключей GEMINI_API_KEY в переменной окружения .env');
   }
 
-  // Переключаемся на актуальную и быструю модель gemini-2.5-flash
-  const response = await fetch(`https://generativelanguage.googleapis.com/v1/models/gemini-2.5-flash:generateContent?key=${apiKey}`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      contents: [{ parts: [{ text: prompt }] }]
-    })
-  });
+  // Перебираем ключи по очереди
+  for (let i = 0; i < apiKeys.length; i++) {
+    const apiKey = apiKeys[i];
+    try {
+      const response = await fetch(`https://generativelanguage.googleapis.com/v1/models/gemini-2.5-flash:generateContent?key=${apiKey}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          contents: [{ parts: [{ text: prompt }] }]
+        })
+      });
 
-  if (!response.ok) {
-    const errText = await response.text();
-    throw new Error(`Gemini API Error: ${response.status} - ${errText}`);
+      if (!response.ok) {
+        const errText = await response.text();
+        
+        // Если этот конкретный ключ поймал лимит 429 и у нас есть следующий ключ — ротируем!
+        if (response.status === 429 && i < apiKeys.length - 1) {
+          console.log(`⚠️ [Gemini] Ключ №${i + 1} исчерпал лимит (429). Автопереключение на ключ №${i + 2}...`);
+          continue; 
+        }
+        throw new Error(`Gemini API Error: ${response.status} - ${errText}`);
+      }
+
+      const data = await response.json();
+      return data.candidates?.[0]?.content?.parts?.[0]?.text || '';
+
+    } catch (error) {
+      // Ловим сетевые ошибки или ошибки таймаута: если это 429 и есть запасные ключи — идем дальше
+      if ((error.message?.includes('429') || error.status === 429) && i < apiKeys.length - 1) {
+        console.log(`⚠️ [Gemini] Ошибка сети (429) на ключе №${i + 1}. Пробуем ключ №${i + 2}...`);
+        continue;
+      }
+      throw error; // Если ключи кончились или ошибка критическая — прокидываем её наверх
+    }
   }
-
-  const data = await response.json();
-  return data.candidates?.[0]?.content?.parts?.[0]?.text || '';
 }
-
 // Наш системный промпт с жестким лимитом под Telegram (адаптирован под Llama и Gemini)
 const SYSTEM_ORCHESTRATION_PROMPT = `
 Ты — высококвалифицированный консилиум экспертов "FreelanceScout" по оценке фриланс-заказов в сфере IT и B2B.
