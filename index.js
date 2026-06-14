@@ -17,7 +17,6 @@ import {
   incrementApproved,
   incrementRejected
 } from './src/utils/stats.js';
-import { analyzeWithGemini } from './src/analyzer/gemini.js';
 
 console.log('🔍 Отладка: Все импорты успешны!');
 
@@ -100,7 +99,8 @@ async function generateWithGeminiFallback(prompt) {
       return data.candidates?.[0]?.content?.parts?.[0]?.text || '';
 
     } catch (error) {
-      // Ловим сетевые ошибки или ошибки таймаута
+      // Ловим сетевые ошибки или ошибки таймаута для глубокого дебага
+      console.log('[Gemini КРИТИЧЕСКИЙ ДЕБАГ ОШИБКИ]:', error);
       if (error.message?.includes('429') || error.status === 429) {
         console.log(`⚠️ [Gemini] Ошибка сети (429) на ключе №${idx + 1}. Переключаем указатель...`);
         currentGeminiKeyIndex++;
@@ -276,9 +276,9 @@ async function runAutoParser() {
 
   // --- ЭТАП 3: ПРОГОНЯЕМ КАЖДЫЙ ЗАКАЗ FL.RU ЧЕРЕЗ ИИ ---
   for (const ad of flAds) {
-    // ПУЛЬС-ФИЛЬТР: Искусственная пауза в 2 секунды перед КАЖДЫМ заказом. 
-    // Защищает API от залпового огня, даже если предыдущие заказы улетели в continue!
-    await new Promise(resolve => setTimeout(resolve, 2000));
+    // ПУЛЬС-ФИЛЬТР: Искусственная пауза в 2.5 секунды перед КАЖДЫМ заказом. 
+    // Защищает API от залпового огня по RPM, даже если предыдущие заказы пролетели по continue!
+    await new Promise(resolve => setTimeout(resolve, 2500));
 
     console.log(`[AutoParser] Передаем на консилиум: "${ad.title}"`);
 
@@ -316,27 +316,13 @@ async function runAutoParser() {
       continue;
     }
 
-    console.log(`[AutoParser] 🔥 Заказ одобрен ${isFallbackUsed ? 'Gemini (Резерв)' : 'Groq'}! Запускаем глубокий анализ Gemini...`);
+    console.log(`[AutoParser] 🔥 Заказ одобрен ${isFallbackUsed ? 'Gemini (Резерв)' : 'Groq'}! Отправляем вердикт консилиума в Telegram...`);
     incrementApproved();
 
-    let geminiCard = '';
-    try {
-      const analysis = await analyzeWithGemini(inputText);
-      geminiCard = `
-💰 Бюджет: ${analysis.budget}
-⏰ Срок: ${analysis.deadline}
-🛠 Стек: ${analysis.stack.join(', ')}
-⚠️ Риск: ${analysis.main_risk}
-👤 Клиент: ${analysis.client_quality}
-⭐ Скор: ${analysis.score}/10 — ${analysis.score_reason}
-
-💬 Ответ клиенту:
-${analysis.first_reply}
-      `.trim();
-    } catch (err) {
-      console.error('[AutoParser] Глубокий структурный анализ Gemini недоступен, шлем текстовый вердикт:', err.message);
-      geminiCard = result;
-    }
+    // ОПТИМИЗАЦИЯ: Вместо тяжелого повторного структурного анализа Gemini, мы используем 
+    // готовый детальный разбор (result) от Groq, который уже содержит полные данные экспертов.
+    // Это экономит суточные лимиты "PerProject" на 95%!
+    const geminiCard = result; 
 
     const header = `🆕 НОВЫЙ ЗАКАЗ С FL.RU\n📌 ${ad.title}\n🔗 ${ad.link}\n\n`;
     const fullMessage = header + geminiCard;
@@ -347,8 +333,8 @@ ${analysis.first_reply}
       await bot.telegram.sendMessage(TELEGRAM_CHAT_ID, fullMessage.slice(0, 4000) + '\n\n...[Текст обрезан]');
     }
 
-    // Дополнительная защитная пауза для одобренных сочных лидов (чтобы не спамить Телеграм)
-    await new Promise(resolve => setTimeout(resolve, 3000));
+    // Дополнительный тайм-аут для успешной отправки в ТГ
+    await new Promise(resolve => setTimeout(resolve, 1500));
   }
 
   console.log('[AutoParser] ✅ Все новые заказы проверены. Спим 15 минут.');
