@@ -6,14 +6,11 @@ import 'dotenv/config';
 console.log('🔍 Отладка: Загружаем Telegraf...');
 import { Telegraf } from 'telegraf';
 
-console.log('🔍 Отладка: Загружаем undici...');
-
-
 console.log('🔍 Отладка: Загружаем groq-sdk...');
 import Groq from 'groq-sdk';
 
 console.log('🔍 Отладка: Пытаемся импортировать модули парсеров из fl.js...');
-import { fetchNewAds} from './src/parser/fl.js';
+import { fetchNewAds } from './src/parser/fl.js';
 
 import { checkEmailKwork, checkFlDirectMessages } from './src/parser/email.js';
 import {
@@ -22,9 +19,7 @@ import {
 } from './src/utils/stats.js';
 import { analyzeWithGemini } from './src/analyzer/gemini.js';
 
-console.log('🔍 Отладка: Все импорты успешны! Настраиваем v2rayN прокси...');
-
-console.log('🔍 Отладка: Прокси успешно перехвачен глобальным диспетчером.');
+console.log('🔍 Отладка: Все импорты успешны!');
 
 console.log('🔍 Отладка: Проверяем ключи .env...');
 if (!process.env.TELEGRAM_BOT_TOKEN || !process.env.GROQ_API_KEY || !process.env.TELEGRAM_CHAT_ID) {
@@ -38,7 +33,7 @@ const groq = new Groq({ apiKey: process.env.GROQ_API_KEY });
 const TELEGRAM_CHAT_ID = process.env.TELEGRAM_CHAT_ID;
 console.log('🔍 Отладка: Экземпляры созданы. Переходим к основному коду бота...');
 
-// Живучая функция запросов: обрабатывает перегрузки 503 и лимиты 429
+// Живучая функция запросов к Groq: обрабатывает перегрузки 503 и лимиты 429
 async function generateWithRetry(prompt, maxRetries = 3) {
   for (let attempt = 1; attempt <= maxRetries; attempt++) {
     try {
@@ -57,7 +52,31 @@ async function generateWithRetry(prompt, maxRetries = 3) {
   }
 }
 
-// Наш системный промпт с жестким лимитом под Telegram (адаптирован под Llama)
+// Резервная функция-бэкап на случай, если суточные лимиты Groq полностью исчерпаны
+async function generateWithGeminiFallback(prompt) {
+  const apiKey = process.env.GEMINI_API_KEY_1 || process.env.GEMINI_API_KEY_2 || process.env.GEMINI_API_KEY_3 || process.env.GEMINI_API_KEY_4;
+  if (!apiKey) {
+    throw new Error('Нет доступных ключей GEMINI_API_KEY в переменной окружения .env');
+  }
+
+  const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${apiKey}`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      contents: [{ parts: [{ text: prompt }] }]
+    })
+  });
+
+  if (!response.ok) {
+    const errText = await response.text();
+    throw new Error(`Gemini API Error: ${response.status} - ${errText}`);
+  }
+
+  const data = await response.json();
+  return data.candidates?.[0]?.content?.parts?.[0]?.text || '';
+}
+
+// Наш системный промпт с жестким лимитом под Telegram (адаптирован под Llama и Gemini)
 const SYSTEM_ORCHESTRATION_PROMPT = `
 Ты — высококвалифицированный консилиум экспертов "FreelanceScout" по оценке фриланс-заказов в сфере IT и B2B.
 Наша специализация включает:
@@ -90,7 +109,6 @@ const SYSTEM_ORCHESTRATION_PROMPT = `
 И больше ничего не пиши.
 
 Если задача относится к:
-
 - дизайну
 - переводам
 - видеомонтажу
@@ -111,82 +129,79 @@ const SYSTEM_ORCHESTRATION_PROMPT = `
 - ручному наполнению сайтов
 
 то немедленно выдай:
-
 ⛔ НЕ НАША НИША
 Вердикт: ПРОПУСТИТЬ
 
 **🔍 СКАУТ-ОЦЕНЩИК (Анализ лида и клиента)**
-— Бюджет: Оценка адекватности цены относительно объема работы. (Пример: "Бюджет занижен в 3 раза, так как интеграция двух тяжелых API не может стоить 5 000 руб...").
-— Сроки: Реалистичность дедлайна. Выдели красные флаги (например, "Срок 'вчера' указывает на плохой менеджмент заказчика...").
-— Профиль клиента и скрытые угрозы: Разбор текста на токсичность, размытые требования ("сделайте красиво", "там работы на час"). Опиши, чем грозит общение с таким клиентом.
-— Экспертный Скоринг: X/10 (Подробно распиши, из чего сложилась эта оценка: сколько баллов снято за бюджет, сколько за ТЗ).
+— Бюджет: Оценка адекватности цены относительно объема работы.
+— Сроки: Реалистичность дедлайна. Выдели красные флаги.
+— Профиль клиента и скрытые угрозы: Разбор текста на токсичность, размытые требования.
+— Экспертный Скоринг: X/10
 
 **💻 ТЕХНИЧЕСКИЙ ЭКСПЕРТ (Архитектура и стек)**
-— Предлагаемый стек: Конкретные инструменты, библиотеки, базы данных. Объясни выбор (например: "Используем библиотеку node-imap, так как она работает на чистых сокетах и обходит HTTP-прокси...").
-— Уровень сложности: X/10 для Middle-разработчика. Обоснуй сложность (кол-во сущностей, ветвление логики).
-— Главный технический риск: Развернутое объяснение уязвимого места проекта (капризные лимиты сторонних API, защита сайтов от парсинга, жесткая капча) и как мы будем его обходить.
+— Предлагаемый стек: Конкретные инструменты, библиотеки, базы данных.
+— Уровень сложности: X/10 для Middle-разработчика.
+— Главный технический риск: Развернутое объяснение уязвимого места проекта.
 
 **📋 ПРОЕКТ-МЕНЕДЖЕР (Бизнес-логика и декомпозиция)**
-— Пошаговый план реализации: Подробный план из 3-5 этапов. Для каждого этапа детально распиши, какие подзадачи туда входят и почему на них заложено именно столько времени.
-— Оценка трудозатрат: Итого часов (X-Y часов). Поясни формулу расчета.
-— Снайперские вопросы клиенту: Максимум 3 критически важных вопроса, которые снимут неопределенность по ТЗ и покажут нашу глубокую экспертизу.
+— Пошаговый план реализации: Подробный план из 3-5 этапов.
+— Оценка трудозатрат: Итого часов (X-Y часов).
+— Снайперские вопросы клиенту: Максимум 3 критически важных вопроса.
 
 **⚖️ АРБИТР (Финальный вердикт)**
-— Итоговое решение: БРАТЬ или ПРОПУСТИТЬ. Дай развернутое резюме-обоснование (взвесь плюсы и минусы, описанные предыдущими экспертами).
-— Профессиональный черновик ответа: Бизнес-отклик (4-6 предложений), готовый к отправке клиенту. Пиши в уважительном, экспертном B2B-стиле, без банальных "сделаю быстро и дешево". Подчеркни понимание его технической боли.
+— Итоговое решение: БРАТЬ или ПРОПУСТИТЬ.
+— Профессиональный черновик ответа: Бизнес-отклик (4-6 предложений), готовый к отправке клиенту.
 — Первые 3 шага в случае старта: Что конкретно делаем в первые часы после получения предоплаты.
 
 ПРАВИЛА ОФОРМЛЕНИЯ:
-- Избегай общих фраз вроде "заказ хороший" или "надо делать". Давай глубокую техническую и аналитическую аргументацию.
 - Текст должен быть понятным, структурированным, написанным на русском языке в строгом деловом стиле.
 - Если в тексте есть исходная ссылка на проект — обязательно выведи её отдельной строкой в самом конце: 🔗 [ссылка]
 `;
 
 // ── РУЧНОЙ РЕЖИМ ЧЕРЕЗ ЧАТ БОТА ───────────────────────────
-// 🔥 АВТОМАТИЧЕСКИЙ ПЕРЕХВАТ ЗАКАЗОВ ИЗ КВОРКА
 bot.on('text', async (ctx) => {
   const incomingText = ctx.message.text;
 
-  // Проверяем: если в тексте сообщения есть ссылка на kwork.ru/projects/
   if (incomingText.includes('kwork.ru/projects/')) {
     console.log('[KworkInterceptor] 🚀 Пойман автоматический заказ с Kwork!');
     
-    // Мгновенно отправляем его на наше ИИ-сито (Шаг 0, Шаг 1 и т.д.)
     try {
       const fullPrompt = `${SYSTEM_ORCHESTRATION_PROMPT}\n\nТЕКСТ ПРОЕКТА:\n"${incomingText}"`;
-      
-      // Показываем в консоли, что Грок начал думать
       console.log('[KworkInterceptor] Передаем проект на ИИ-консилиум...');
-      const completion = await generateWithRetry(fullPrompt);
-      const result = completion.choices[0]?.message?.content || '';
+      
+      let result = '';
+      try {
+        const completion = await generateWithRetry(fullPrompt);
+        result = completion.choices[0]?.message?.content || '';
+      } catch (err) {
+        if (err.message?.includes('429') || err.status === 429) {
+          console.log('⚠️ [Groq] Лимит исчерпан в ручном режиме. Fallback на Gemini...');
+          result = await generateWithGeminiFallback(fullPrompt);
+        } else {
+          throw err;
+        }
+      }
 
-      // Усиленный b2b-фильтр ниши
       if (result.includes('НЕ НАША НИША')) {
-
-  incrementRejected();
-
-  console.log(
-    `[KworkInterceptor] ⛔ Заказ отклонен ИИ (не наша специализация)`
-  );
-
-  return;
-}
+        incrementRejected();
+        console.log(`[KworkInterceptor] ⛔ Заказ отклонен ИИ (не наша специализация)`);
+        return;
+      }
 
       console.log(`[AutoParser] 🔥 Релевантный заказ одобрен! Отправляем в Telegram...`);
       incrementApproved();
 
-      await ctx.reply(header + result);
+      const kworkHeader = `🆕 ПЕРЕХВАТ АВТО-ЗАКАЗА KWORK\n\n`;
+      await ctx.reply(kworkHeader + result);
       
     } catch (err) {
       console.error('[KworkInterceptor] Ошибка обработки перехваченного заказа:', err.message);
     }
-    return; // Выходим, чтобы обычный ручной режим не дублировал логику
+    return;
   }
 
-  // --- Твой старый код ручной обработки ТЗ (если текст без ссылок) остается ниже ---
   console.log('🤖 Ручной режим: получен текст ТЗ от пользователя...');
-  // ... старый код обработки ...
-})
+});
 
 // ── АВТОМАТИЧЕСКИЙ ПЛАНОВЫЙ ПАРСЕР (FL.ru + ПОЧТА KWORK) ──
 async function runAutoParser() {
@@ -198,12 +213,14 @@ async function runAutoParser() {
   } catch (err) {
     console.error('[AutoParser] Ошибка сбора данных с почты Kwork:', err.message);
   }
-// 🔥 --- ЭТАП 1.5: ПРОВЕРКА ЛИЧНЫХ СООБЩЕНИЙ С FL.RU ---
-try {
+
+  // --- ЭТАП 1.5: ПРОВЕРКА ЛИЧНЫХ СООБЩЕНИЙ С FL.RU ---
+  try {
     await checkFlDirectMessages(bot);
-} catch (err) {
+  } catch (err) {
     console.error('[AutoParser] Ошибка проверки сообщений FL.ru:', err.message);
-}
+  }
+
   // --- ЭТАП 2: СБОР СВЕЖИХ ЗАКАЗОВ С FL.RU ---
   let flAds = [];
   try {
@@ -225,25 +242,46 @@ try {
     console.log(`[AutoParser] Передаем на консилиум: "${ad.title}"`);
 
     const inputText = `Заголовок: ${ad.title}\nКатегория: ${ad.category}\nОписание: ${ad.description}\nСсылка: ${ad.link}`;
+    const fullPrompt = `${SYSTEM_ORCHESTRATION_PROMPT}\n\nТЕКСТ ПРОЕКТА:\n"${inputText}"`;
+    
+    let result = '';
+    let isFallbackUsed = false;
 
     try {
-      const fullPrompt = `${SYSTEM_ORCHESTRATION_PROMPT}\n\nТЕКСТ ПРОЕКТА:\n"${inputText}"`;
+      // Пытаемся получить вердикт от основного ИИ Groq
       const completion = await generateWithRetry(fullPrompt);
-      const result = completion.choices[0]?.message?.content || '';
-
-      // Усиленный b2b-фильтр ниши: блокирует отправку при любом маркере пропуска
-      if (result.includes('НЕ НАША НИША') || result.includes('ПРОПУСТИТЬ') || result.includes('НЕ НАШ СТЕК')) {
-        console.log(`[AutoParser] ⛔ Заказ отклонен ИИ (не наша специализация): ${ad.title}`);
-        continue; // Жесткий пропуск, в Telegram ничего не шлем
+      result = completion.choices[0]?.message?.content || '';
+    } catch (err) {
+      // Если поймали суточный лимит 429 — плавно переключаем сито на резервный Gemini
+      if (err.message?.includes('429') || err.status === 429 || err.message?.toLowerCase().includes('limit')) {
+        console.log(`⚠️ [Groq] Превышен суточный лимит токенов (429). Автопереключение на резервный фильтр Gemini...`);
+        try {
+          result = await generateWithGeminiFallback(fullPrompt);
+          isFallbackUsed = true;
+        } catch (geminiErr) {
+          console.error(`❌ [AutoParser] Резервный Gemini тоже дал сбой для "${ad.title}":`, geminiErr.message);
+          continue; // Оба ИИ перегружены, идем к следующему объявлению
+        }
+      } else {
+        console.error(`❌ [AutoParser] Критическая ошибка Groq при фильтрации "${ad.title}":`, err.message);
+        continue;
       }
+    }
 
-      console.log(`[AutoParser] 🔥 Заказ одобрен Groq! Запускаем глубокий анализ Gemini...`);
-incrementApproved();
+    // Фильтр ниши
+    if (result.includes('НЕ НАША НИША') || result.includes('ПРОПУСТИТЬ') || result.includes('НЕ НАШ СТЕК')) {
+      console.log(`[AutoParser] ⛔ Заказ отклонен ИИ (не наша специализация): ${ad.title}`);
+      incrementRejected();
+      continue;
+    }
 
-let geminiCard = '';
-try {
-  const analysis = await analyzeWithGemini(inputText);
-  geminiCard = `
+    console.log(`[AutoParser] 🔥 Заказ одобрен ${isFallbackUsed ? 'Gemini (Резерв)' : 'Groq'}! Запускаем глубокий анализ Gemini...`);
+    incrementApproved();
+
+    let geminiCard = '';
+    try {
+      const analysis = await analyzeWithGemini(inputText);
+      geminiCard = `
 💰 Бюджет: ${analysis.budget}
 ⏰ Срок: ${analysis.deadline}
 🛠 Стек: ${analysis.stack.join(', ')}
@@ -253,34 +291,30 @@ try {
 
 💬 Ответ клиенту:
 ${analysis.first_reply}
-  `.trim();
-} catch (err) {
-  console.error('[AutoParser] Gemini недоступен, fallback на Groq:', err.message);
-  geminiCard = result;
-}
-
-const header = `🆕 НОВЫЙ ЗАКАЗ С FL.RU\n📌 ${ad.title}\n🔗 ${ad.link}\n\n`;
-const fullMessage = header + geminiCard;
-
-if (fullMessage.length <= 4096) {
-  await bot.telegram.sendMessage(TELEGRAM_CHAT_ID, fullMessage);
-} else {
-  await bot.telegram.sendMessage(TELEGRAM_CHAT_ID, fullMessage.slice(0, 4000) + '\n\n...[Текст обрезан]');
-}
-
-      // Anti-flood пауза под лимиты Groq
-      await new Promise(resolve => setTimeout(resolve, 5000));
-
+      `.trim();
     } catch (err) {
-      console.error(`[AutoParser] Ошибка при обработке заказа "${ad.title}":`, err.message);
+      console.error('[AutoParser] Глубокий структурный анализ Gemini недоступен, шлем текстовый вердикт:', err.message);
+      geminiCard = result;
     }
+
+    const header = `🆕 НОВЫЙ ЗАКАЗ С FL.RU\n📌 ${ad.title}\n🔗 ${ad.link}\n\n`;
+    const fullMessage = header + geminiCard;
+
+    if (fullMessage.length <= 4096) {
+      await bot.telegram.sendMessage(TELEGRAM_CHAT_ID, fullMessage);
+    } else {
+      await bot.telegram.sendMessage(TELEGRAM_CHAT_ID, fullMessage.slice(0, 4000) + '\n\n...[Текст обрезан]');
+    }
+
+    // Защитная пауза между запросами
+    await new Promise(resolve => setTimeout(resolve, 5000));
   }
 
   console.log('[AutoParser] ✅ Все новые заказы проверены. Спим 15 минут.');
 }
 
 // ── ЗАПУСК СИСТЕМЫ И ПЛАНИРОВЩИКА ─────────────────────────
-const PARSER_INTERVAL_MS = 15 * 60 * 1000; // Ровно 15 минут
+const PARSER_INTERVAL_MS = 15 * 60 * 1000;
 
 console.log('🤖 Планировщик: Инициализация конвейера бирж...');
 console.log(`🤖 Планировщик: Первая автопроверка запустится через 5 секунд, далее каждые 15 мин.`);
@@ -288,12 +322,9 @@ console.log(`🤖 Планировщик: Первая автопроверка 
 setTimeout(() => {
   console.log('🚀 Планировщик: Таймер подошел, запускаем runAutoParser()...');
   runAutoParser();
-  
   setInterval(runAutoParser, PARSER_INTERVAL_MS);
 }, 5000);
 
-
-// Изолированный запуск самого Telegram-бота
 console.log('📡 Telegram: Попытка установить соединение с серверами...');
 bot.launch()
   .then(() => {
@@ -306,7 +337,6 @@ bot.launch()
     console.error('❌ Telegram: Ошибка соединения при bot.launch():', err.message);
   });
 
-// Корректный перехват остановки процесса
 process.once('SIGINT', () => {
   console.log('🛑 Получен сигнал SIGINT. Останавливаем бота...');
   bot.stop('SIGINT');
