@@ -15,7 +15,7 @@ import Groq from 'groq-sdk';
 console.log('🔍 Отладка: Пытаемся импортировать модули парсеров из fl.js...');
 import { fetchNewAds} from './src/parser/fl.js';
 
-import { checkEmailKwork } from './src/parser/email.js';
+import { checkEmailKwork, checkFlDirectMessages } from './src/parser/email.js';
 import {
   incrementApproved,
   incrementRejected
@@ -198,7 +198,12 @@ async function runAutoParser() {
   } catch (err) {
     console.error('[AutoParser] Ошибка сбора данных с почты Kwork:', err.message);
   }
-
+// 🔥 --- ЭТАП 1.5: ПРОВЕРКА ЛИЧНЫХ СООБЩЕНИЙ С FL.RU ---
+try {
+    await checkFlDirectMessages(bot);
+} catch (err) {
+    console.error('[AutoParser] Ошибка проверки сообщений FL.ru:', err.message);
+}
   // --- ЭТАП 2: СБОР СВЕЖИХ ЗАКАЗОВ С FL.RU ---
   let flAds = [];
   try {
