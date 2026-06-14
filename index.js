@@ -38,7 +38,7 @@ async function generateWithRetry(prompt, maxRetries = 3) {
     try {
       return await groq.chat.completions.create({
         messages: [{ role: 'user', content: prompt }],
-        model: 'llama-3.3-70b-versatile',
+        model: 'llama-3.1-8b-instant',
       });
     } catch (error) {
       if (attempt < maxRetries) {
