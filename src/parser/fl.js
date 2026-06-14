@@ -1,74 +1,62 @@
 // src/parser/fl.js
 // Модуль парсинга RSS-ленты FL.ru
-// Забирает новые заказы, фильтрует по нашей специализации
+// Забирает новые заказы, надежно кэширует ID в MongoDB Atlas и фильтрует мусор
 
 import { XMLParser } from 'fast-xml-parser';
-import fs from 'fs';
-import path from 'path';
-import { fileURLToPath } from 'url';
+import { MongoClient } from 'mongodb';
 
-
-const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const SEEN_ADS_PATH = path.join(__dirname, '../../data/seen_ads.json');
 const FL_RSS_URL = 'https://www.fl.ru/rss/all.xml';
 
-// Ключевые слова нашей специализации
-const RELEVANT_KEYWORDS = [
-  'программирование', 'автоматизация', 'бот', 'парсинг', 'парсер',
-  'скрипт', 'api', 'интеграция', 'python', 'node.js', 'javascript',
-  'telegram', 'искусственный интеллект', 'нейросеть', 'gpt',
-  'webhook', 'selenium', 'playwright', 'разработка сайта',
-  'разработка приложения', 'базы данных', 'sql'
-];
+// Инициализируем клиент MongoDB (переменная MONGODB_URI берется из Railway Variables)
+const mongoClient = new MongoClient(process.env.MONGODB_URI);
+let db, seenAdsCollection;
 
-// Категории которые точно не наши — пропускаем сразу
-const EXCLUDED_CATEGORIES = [
-  'дизайн', 'перевод', 'фото', 'видео', 'аудио', 'копирайт',
-  'бухгалтер', '3d', 'полиграф', 'монтаж', 'логотип', 'иллюстрац',
-  'чертеж', 'autocad', 'solidworks', 'аниматор', 'художник'
-];
-
-// Загружаем список уже обработанных ID
-function loadSeenAds() {
-  try {
-    const data = fs.readFileSync(SEEN_ADS_PATH, 'utf-8');
-    return JSON.parse(data);
-  } catch {
-    console.log('[FL Parser] seen_ads.json не найден, создаём новый...');
-    return { ids: [] };
+// Функция гарантированного подключения к БД
+async function connectToDatabase() {
+  if (!db) {
+    await mongoClient.connect();
+    db = mongoClient.db('freelance_scout');
+    seenAdsCollection = db.collection('seen_ads');
+    
+    // Создаем уникальный индекс по orderId, чтобы поиск летал мгновенно
+    await seenAdsCollection.createIndex({ orderId: 1 }, { unique: true }).catch(() => {});
   }
 }
 
-// Сохраняем обновлённый список ID
-function saveSeenAds(seenAds) {
-  fs.mkdirSync(path.dirname(SEEN_ADS_PATH), { recursive: true });
-  fs.writeFileSync(SEEN_ADS_PATH, JSON.stringify(seenAds, null, 2));
-  console.log(`[FL Parser] seen_ads.json обновлён. Всего в базе: ${seenAds.ids.length}`);
-}
+// 1. ЖЕСТКИЙ ЧЕРНЫЙ СПИСОК — если есть эти слова в заголовке, до ИИ заказ вообще не дойдет
+const HARD_EXCLUDE = [
+  'seo', 'продвижение', 'отзывы', 'дизайн', 'перевод', 
+  'суд', 'юрист', '3d', 'иллюстрац', 'лендинг', 
+  'figma', 'магазин', 'маркетплейс', 'настройка компьютера',
+  'прослушать звонки', 'восстановить аккаунт', 'чертеж', 'схема',
+  'видеомонтаж', 'ролики', 'подача в суд'
+];
 
-// Проверяем релевантность заказа нашей специализации
-function isRelevant(item) {
-  const text =
-    `${item.title} ${item.description} ${item.category}`.toLowerCase();
+// 2. БЕЛОЙ СПИСОК КЛЮЧЕВЫХ СЛОВ (Регулярные выражения с жесткими границами слов)
+const RELEVANT_REGEX = [
+  /(?<![а-яёА-ЯЁ])бот(?![а-яёА-ЯЁ])/i, // Ищет именно "бот", слова "работа/разработка" игнорируются!
+  /интеграц/i,
+  /автоматизац/i,
+  /скрипт/i,
+  /api/i,
+  /webhooks/i,
+  /node/i
+];
 
-  const isExcluded = EXCLUDED_CATEGORIES.some(
-    kw => text.includes(kw)
-  );
-
-  if (isExcluded) return false;
-
-  const matchedKeyword = RELEVANT_KEYWORDS.find(
-    kw => text.includes(kw)
-  );
-
-  if (matchedKeyword) {
-    console.log(
-      `[FL Parser] Ключевое слово "${matchedKeyword}" → ${item.title}`
-    );
-    return true;
+// Функция проверки релевантности заказа (фильтруем строго по заголовку)
+export function isOrderRelevant(ad) {
+  const title = (ad.title || '').toLowerCase();
+  
+  // Шаг А: Проверка по черному списку
+  const hasTrashWord = HARD_EXCLUDE.some(word => title.includes(word));
+  if (hasTrashWord) {
+    return false;
   }
 
-  return false;
+  // Шаг Б: Проверка по белому списку с умными границами слов
+  const isTarget = RELEVANT_REGEX.some(regex => regex.test(title));
+  
+  return isTarget;
 }
 
 // Главная функция — возвращает массив новых релевантных заказов
@@ -77,6 +65,15 @@ export async function fetchNewAds() {
   console.log('[FL Parser] Запуск проверки FL.ru RSS...');
   console.log(`[FL Parser] Время: ${new Date().toLocaleString('ru-RU')}`);
 
+  // Шаг 1. Подключаемся к внешней базе данных
+  try {
+    await connectToDatabase();
+  } catch (dbErr) {
+    console.error('❌ [FL Parser] Ошибка подключения к MongoDB Atlas:', dbErr.message);
+    return []; // Если база недоступна, пропускаем круг во избежание спама дублями
+  }
+
+  // Шаг 2. Запрос RSS-ленты
   let response;
   try {
     response = await fetch(FL_RSS_URL, {
@@ -97,6 +94,7 @@ export async function fetchNewAds() {
   const xml = await response.text();
   console.log('[FL Parser] RSS получен, парсим XML...');
 
+  // Шаг 3. Парсинг XML структуры
   const parser = new XMLParser({ ignoreAttributes: false, cdataPropName: '__cdata' });
   const result = parser.parse(xml);
 
@@ -104,18 +102,21 @@ export async function fetchNewAds() {
   const itemsArray = Array.isArray(rawItems) ? rawItems : [rawItems];
   console.log(`[FL Parser] Всего объявлений в ленте: ${itemsArray.length}`);
 
-  const seenAds = loadSeenAds();
   const newAds = [];
 
+  // Шаг 4. Цикл обработки объявлений
   for (const item of itemsArray) {
-    // Достаём ID — guid или link
+    // Извлекаем уникальный ID объявления
     const id = (item.guid?.__cdata || item.guid || item.link || '').toString().trim();
     if (!id) continue;
 
-    // Пропускаем уже виденные
-    if (seenAds.ids.includes(id)) continue;
+    // Проверяем в MongoDB, видели ли мы этот заказ ранее
+    const alreadySeen = await seenAdsCollection.findOne({ orderId: id });
+    if (alreadySeen) {
+      continue; // Если видели — молча пропускаем
+    }
 
-    // Собираем объект заказа (CDATA-поля требуют особого извлечения)
+    // Собираем чистый объект заказа
     const ad = {
       id,
       title: item.title?.__cdata || item.title || 'Без названия',
@@ -125,30 +126,35 @@ export async function fetchNewAds() {
       pubDate: item.pubDate || ''
     };
 
-    // Сразу запоминаем ID — независимо от релевантности
-    seenAds.ids.push(id);
-
-    // Фильтруем по специализации
-    if (!isRelevant(ad)) {
-      console.log(`[FL Parser] ⏭ Пропускаем (не наша ниша): ${ad.title}`);
+    // Заказ абсолютно новый! Сразу же сохраняем его в MongoDB, чтобы больше не обрабатывать
+    try {
+      await seenAdsCollection.insertOne({
+        orderId: id,
+        title: ad.title,
+        createdAt: new Date()
+      });
+    } catch (e) {
+      // Защита от параллельных запросов
       continue;
     }
 
-    console.log(`[FL Parser] ✅ Новый релевантный заказ: ${ad.title}`);
+    // Проверяем заказ через сито регулярных выражений по заголовку
+    if (!isOrderRelevant(ad)) {
+      console.log(`[FL Parser] ⏭ Пропускаем (не наша ниша): "${ad.title}"`);
+      continue;
+    }
+
+    // Если заказ прошел все фильтры — отправляем его в массив для ИИ
+    console.log(`[FL Parser] ✅ Новый релевантный заказ: "${ad.title}"`);
     newAds.push(ad);
   }
 
-  // Ограничиваем размер базы — храним последние 1000 ID
-  if (seenAds.ids.length > 1000) {
-    seenAds.ids = seenAds.ids.slice(-1000);
-  }
-
-  saveSeenAds(seenAds);
-  console.log(`[FL Parser] Итого новых релевантных заказов: ${newAds.length}`);
+  console.log(`[FL Parser] Итого новых релевантных заказов для отправки ИИ: ${newAds.length}`);
   console.log('[FL Parser] ========================================');
 
   return newAds;
 }
+
 // ==========================================
 // ФУНКЦИЯ: ПОЛУЧЕНИЕ СВЕЖИХ ЗАКАЗОВ С KWORK.RU
 // ==========================================
